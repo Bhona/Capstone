@@ -1,0 +1,237 @@
+service:
+  name: serverless-find-pets-app
+
+plugins:
+  - serverless-webpack
+  - serverless-aws-documentation
+  - serverless-reqvalidator-plugin
+  - serverless-iam-roles-per-function
+  # - serverless-dynamodb-local
+  # - serverless-offline
+
+package:
+  individually: true
+
+custom:
+  webpack:
+    webpackConfig: ./webpack.config.js
+    includeModules: true   
+
+documentation:
+    api:
+      info:
+        version: v1.0.0
+        title: FIND PETS API
+        description: serverless api for PETS app
+    models:
+      - name: CreatePet
+        contentType: application/json
+        schema: ${file(models/create-request.json))}
+      - name: UpdatePet
+        contentType: application/json
+        schema: ${file(models/update-request.json)}
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+  apiGateway:
+    minimumCompressionSize: 2048
+
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+
+  environment:
+      AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+      PETS_TABLE: pets-${self:provider.stage}
+      IMAGES_TABLE: images-${self:provider.stage}
+      IMAGE_ID_INDEX: ImageIdIndex
+      IMAGES_BUCKET: pet-images-${self:provider.stage}
+      SIGNED_URL_EXPIRATION: 300
+      USER_ID_INDEX: userId
+      IS_OFFLINE: true
+  tracing:
+   lambda: true
+   apiGateway: true
+
+functions:
+
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+  GetPets:
+    handler: src/lambda/http/getPets.handler
+    events:
+      - http:
+          method: get
+          path: pets
+          authorizer: Auth
+          cors: true
+    iamRoleStatementsName: ${self:service.name}-get-pet-role-${self:provider.stage}
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PETS_TABLE}
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PETS_TABLE}/index/${self:provider.environment.USER_ID_INDEX}
+
+  DeletePet:
+    handler: src/lambda/http/deletePet.handler
+    events:
+      - http:
+          method: delete
+          path: pets/{petId}
+          authorizer: Auth
+          cors: true
+    iamRoleStatementsName: ${self:service.name}-delete-pet-role-${self:provider.stage}
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:DeleteItem
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PETS_TABLE}
+    - Effect: Allow
+      Action:
+      - s3:GetObject
+      - s3:DeleteObject
+      Resource: arn:aws:s3:::${self:provider.environment.IMAGES_BUCKET}/*
+
+  CreatePet:
+    handler: src/lambda/http/createPet.handler
+    events:
+      - http:
+          method: post
+          path: pets
+          authorizer: Auth
+          cors: true
+          reqValidatorName: RequestBodyValidator
+          documentation:
+            summary: create new PET 
+            description: create new PET
+            requestModels:
+              'application/json': CreatePet
+    iamRoleStatementsName: ${self:service.name}-create-pet-role-${self:provider.stage}
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:PutItem
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PETS_TABLE}      
+
+  UpdatePet:
+    handler: src/lambda/http/updatePets.handler
+    events:
+      - http:
+          method: patch
+          path: pets/{petId}
+          authorizer: Auth
+          cors: true
+          reqValidatorName: RequestBodyValidator
+          documentation:
+            summary: update a PET 
+            description: update a PET
+            requestModels:
+              'application/json': UpdatePet
+    iamRoleStatementsName: ${self:service.name}-update-pet-role-${self:provider.stage}
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:UpdateItem
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PETS_TABLE}
+
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    events:
+      - http:
+          method: post
+          path: pets/{petId}/attachment
+          authorizer: Auth
+          cors: true
+    iamRoleStatementsName: ${self:service.name}-generate-url-role-${self:provider.stage}
+    iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:UpdateItem
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.PETS_TABLE}
+    - Effect: Allow
+      Action:
+      - s3:PutObject
+      - s3:GetObject
+      Resource: arn:aws:s3:::${self:provider.environment.IMAGES_BUCKET}/*
+
+resources:
+  Resources:
+    RequestBodyValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      Properties:
+        Name: 'request-body-validator'
+        RestApiId:
+          Ref: 'ApiGatewayRestApi'
+        ValidateRequestBody: true
+        ValidateRequestParameters: false
+
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'*'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: 'ApiGatewayRestApi'
+
+    petsDynamoDbTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: petId
+            AttributeType: S
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: petId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.USER_ID_INDEX}
+            KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:provider.environment.PETS_TABLE}
+
+    PetsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.IMAGES_BUCKET}
+        CorsConfiguration:
+          CorsRules:
+            -
+              AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: MyPolicy
+          Version: "2012-10-17"
+          Statement:
+            - Sid: PublicReadForGetBucketObjects
+              Effect: Allow
+              Principal: '*'
+              Action: 's3:GetObject'
+              Resource: 'arn:aws:s3:::${self:provider.environment.IMAGES_BUCKET}/*'
+        Bucket: !Ref PetsBucket

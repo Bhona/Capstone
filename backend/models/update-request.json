@@ -1,0 +1,26 @@
+{
+    "$schema" : "http://json-schema.org/draft-04/schema#",
+    "title": "update-pet",
+    "type":"object",
+    "properties": {
+        "name":{
+            "type":"string"
+        },
+        "description": {
+            "type": "string"
+        },
+        "dueDate":{
+            "type":"string"
+        },
+        "done":{
+            "type":"boolean"
+        }
+    },
+    "required":[
+        "name",
+        "description",
+        "dueDate",
+        "done"
+    ],
+    "additionalProperties": false
+}
